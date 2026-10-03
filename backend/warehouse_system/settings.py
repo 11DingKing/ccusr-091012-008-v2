@@ -16,6 +16,7 @@ INSTALLED_APPS = [
     "apps.authentication",
     "apps.warehouse",
     "apps.personnel",
+    "apps.qualifications",
     "apps.reports",
 ]
 MIDDLEWARE = [

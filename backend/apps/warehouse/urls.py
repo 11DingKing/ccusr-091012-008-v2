@@ -8,6 +8,8 @@ from .views import (
     VarietyListView, VarietyDetailView, VarietyBatchDeleteView,
     VarietyTemplateView, VarietyImportView,
     DashboardView, GoodsListView, StockInListView, StockOutListView,
+    StockOutDetailView, StockOutAssignView,
+    StockOutApprovalView, StockOutReceiveView, StockOutReleaseView,
     WarningListView, ApprovalListView
 )
 
@@ -42,6 +44,11 @@ urlpatterns = [
     
     # 出库管理
     path('stock-out/', StockOutListView.as_view(), name='stock-out-list'),
+    path('stock-out/<int:pk>/', StockOutDetailView.as_view(), name='stock-out-detail'),
+    path('stock-out/<int:pk>/assign/', StockOutAssignView.as_view(), name='stock-out-assign'),
+    path('stock-out/<int:pk>/approval/', StockOutApprovalView.as_view(), name='stock-out-approval'),
+    path('stock-out/<int:pk>/receive/', StockOutReceiveView.as_view(), name='stock-out-receive'),
+    path('stock-out/<int:pk>/release/', StockOutReleaseView.as_view(), name='stock-out-release'),
     
     # 预警管理
     path('warnings/', WarningListView.as_view(), name='warning-list'),

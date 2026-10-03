@@ -1,7 +1,11 @@
 """
 仓库管理序列化器
 """
+from decimal import Decimal
+
 from rest_framework import serializers
+
+from apps.authentication.models import User
 from .models import Unit, Category, Variety, Goods, StockIn, StockOut, Warning, Approval
 
 
@@ -164,16 +168,88 @@ class StockInSerializer(serializers.ModelSerializer):
 class StockOutSerializer(serializers.ModelSerializer):
     """出库记录序列化器"""
     goods_name = serializers.CharField(source='goods.name', read_only=True)
+    goods_code = serializers.CharField(source='goods.code', read_only=True)
     operator_name = serializers.CharField(source='operator.username', read_only=True)
+    approver_name = serializers.CharField(source='approver.username', read_only=True)
+    intake_operator_name = serializers.CharField(source='intake_operator.username', read_only=True)
+    release_operator_name = serializers.CharField(source='release_operator.username', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    
+    qualification_checks = serializers.SerializerMethodField()
+
     class Meta:
         model = StockOut
         fields = [
-            'id', 'goods', 'goods_name', 'operator', 'operator_name',
+            'id', 'goods', 'goods_name', 'goods_code', 'operator', 'operator_name',
             'receiver', 'receiver_dept', 'quantity', 'status', 'status_display',
-            'stock_out_time', 'remark', 'created_at'
+            'approver', 'approver_name', 'approved_at',
+            'intake_operator', 'intake_operator_name', 'received_at',
+            'release_operator', 'release_operator_name', 'released_at',
+            'stock_out_time', 'remark', 'created_at', 'qualification_checks',
         ]
+
+    def get_qualification_checks(self, obj):
+        """各关键节点最近一次资质核验证据（按节点归并）。"""
+        checks = {}
+        for check in obj.qualification_checks.all():
+            # 已按 -checked_at 排序，保留每个节点最新一条
+            checks.setdefault(check.business, check)
+        result = {}
+        for business, check in checks.items():
+            result[business] = {
+                'result': check.result,
+                'result_display': check.get_result_display(),
+                'basis': check.basis,
+                'assignee': check.assignee_id,
+                'need_reassign': check.need_reassign,
+                'failure_reasons': check.failure_reasons,
+                'checked_at': check.checked_at.isoformat() if check.checked_at else None,
+            }
+        return result
+
+
+class StockOutCreateSerializer(serializers.Serializer):
+    """出库申请创建序列化器"""
+    goods = serializers.IntegerField(required=True, error_messages={'required': '请选择货物'})
+    quantity = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'),
+        required=True, error_messages={'required': '请填写出库数量', 'min_value': '出库数量必须大于0'},
+    )
+    receiver = serializers.CharField(max_length=100, required=True, error_messages={
+        'required': '请填写领用人', 'blank': '领用人不能为空',
+    })
+    receiver_dept = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    remark = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_goods(self, value):
+        if not Goods.objects.filter(pk=value, is_active=True).exists():
+            raise serializers.ValidationError('货物不存在或已停用')
+        return value
+
+
+class StockOutAssignSerializer(serializers.Serializer):
+    """节点责任人分配/重新分配序列化器"""
+    approver = serializers.IntegerField(required=False, allow_null=True)
+    intake_operator = serializers.IntegerField(required=False, allow_null=True)
+    release_operator = serializers.IntegerField(required=False, allow_null=True)
+
+    def _validate_user(self, value):
+        if value is None:
+            return None
+        user = User.objects.filter(pk=value).first()
+        if not user:
+            raise serializers.ValidationError('指定人员不存在')
+        if not user.is_active:
+            raise serializers.ValidationError(f'人员 {user.username} 账号已停用')
+        return value
+
+    def validate_approver(self, value):
+        return self._validate_user(value)
+
+    def validate_intake_operator(self, value):
+        return self._validate_user(value)
+
+    def validate_release_operator(self, value):
+        return self._validate_user(value)
 
 
 class WarningSerializer(serializers.ModelSerializer):

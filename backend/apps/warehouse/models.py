@@ -159,33 +159,50 @@ class StockOut(models.Model):
     """出库记录模型"""
     STATUS_CHOICES = [
         ('pending', '待审批'),
-        ('approved', '已通过'),
+        ('approved', '已审批'),
+        ('received', '已收件'),
         ('rejected', '已拒绝'),
-        ('completed', '已完成'),
+        ('completed', '已放行'),
     ]
-    
+
     goods = models.ForeignKey(
         Goods, on_delete=models.CASCADE,
         related_name='stock_outs', verbose_name='货物'
     )
     operator = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True,
-        related_name='stock_out_operations', verbose_name='操作人'
+        related_name='stock_out_operations', verbose_name='申请人'
     )
     receiver = models.CharField('领用人', max_length=100)
     receiver_dept = models.CharField('领用部门', max_length=100, blank=True)
     quantity = models.DecimalField('出库数量', max_digits=12, decimal_places=2)
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
+    # 三个关键节点的责任人（可由主管预先分配/中途重新分配）与实际办理时间
+    approver = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='stock_out_approvals', verbose_name='审批人'
+    )
+    approved_at = models.DateTimeField('审批时间', null=True, blank=True)
+    intake_operator = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='stock_out_intakes', verbose_name='收件人'
+    )
+    received_at = models.DateTimeField('收件时间', null=True, blank=True)
+    release_operator = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='stock_out_releases', verbose_name='放行人'
+    )
+    released_at = models.DateTimeField('放行时间', null=True, blank=True)
     stock_out_time = models.DateTimeField('出库时间', null=True, blank=True)
     remark = models.TextField('备注', blank=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
-    
+
     class Meta:
         db_table = 'wh_stock_out'
         verbose_name = '出库记录'
         verbose_name_plural = verbose_name
         ordering = ['-created_at']
-    
+
     def __str__(self):
         return f"{self.goods.name} - {self.quantity}"
 

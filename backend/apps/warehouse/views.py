@@ -16,7 +16,14 @@ from .serializers import (
     CategorySerializer, CategoryCreateSerializer,
     VarietySerializer, VarietyCreateSerializer,
     GoodsSerializer, StockInSerializer, StockOutSerializer,
+    StockOutCreateSerializer, StockOutAssignSerializer,
     WarningSerializer, ApprovalSerializer
+)
+from .services import (
+    WorkflowError,
+    assign_operators,
+    perform_node,
+    reject_stock_out,
 )
 
 logger = logging.getLogger('apps')
@@ -589,50 +596,227 @@ class GoodsListView(APIView):
 class StockInListView(APIView):
     """入库记录列表视图"""
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
+        queryset = StockIn.objects.select_related('goods', 'operator').all().order_by('-stock_in_time')
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 10))
+        start = (page - 1) * page_size
+        total = queryset.count()
+        serializer = StockInSerializer(queryset[start:start + page_size], many=True)
         return success_response(data={
-            'list': [],
-            'total': 0,
-            'page': 1,
-            'page_size': 10
+            'list': serializer.data, 'total': total, 'page': page, 'page_size': page_size
         })
 
 
 class StockOutListView(APIView):
-    """出库记录列表视图"""
+    """出库申请：列表 / 创建"""
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
+        queryset = StockOut.objects.select_related(
+            'goods', 'operator', 'approver', 'intake_operator', 'release_operator'
+        ).prefetch_related('qualification_checks').all().order_by('-created_at')
+        status = request.query_params.get('status')
+        if status:
+            queryset = queryset.filter(status=status)
+        goods = request.query_params.get('goods')
+        if goods:
+            queryset = queryset.filter(goods_id=goods)
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 10))
+        start = (page - 1) * page_size
+        total = queryset.count()
+        serializer = StockOutSerializer(queryset[start:start + page_size], many=True)
         return success_response(data={
-            'list': [],
-            'total': 0,
-            'page': 1,
-            'page_size': 10
+            'list': serializer.data, 'total': total, 'page': page, 'page_size': page_size
         })
+
+    def post(self, request):
+        """提交出库申请"""
+        serializer = StockOutCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            errors = serializer.errors
+            first_error = list(errors.values())[0]
+            if isinstance(first_error, list):
+                first_error = first_error[0]
+            return error_response(message=str(first_error))
+
+        data = serializer.validated_data
+        goods = Goods.objects.get(pk=data['goods'])
+        stock_out = StockOut.objects.create(
+            goods=goods,
+            operator=request.user,
+            receiver=data['receiver'],
+            receiver_dept=data.get('receiver_dept', ''),
+            quantity=data['quantity'],
+            remark=data.get('remark', ''),
+        )
+        logger.info("用户 %s 提交出库申请 %s", request.user.username, stock_out.id)
+        return success_response(data=StockOutSerializer(stock_out).data, message='申请已提交')
+
+
+class StockOutDetailView(APIView):
+    """出库单详情（含各节点资质核验证据）"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        stock_out = StockOut.objects.select_related(
+            'goods', 'operator', 'approver', 'intake_operator', 'release_operator'
+        ).prefetch_related('qualification_checks').filter(pk=pk).first()
+        if not stock_out:
+            return error_response(message='出库单不存在', code=404)
+        return success_response(data=StockOutSerializer(stock_out).data)
+
+
+class StockOutAssignView(APIView):
+    """分配/重新分配审批、收件、放行责任人。"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        stock_out = StockOut.objects.filter(pk=pk).first()
+        if not stock_out:
+            return error_response(message='出库单不存在', code=404)
+        if request.user.role not in ('superadmin', 'admin'):
+            return error_response(message='仅管理员可分配或重新分配节点责任人', code=403)
+
+        provided = {k: request.data.get(k) for k in ('approver', 'intake_operator', 'release_operator')
+                    if request.data.get(k) is not None}
+        if not provided:
+            return error_response(message='请指定至少一个节点的责任人')
+
+        serializer = StockOutAssignSerializer(data=request.data)
+        if not serializer.is_valid():
+            errors = serializer.errors
+            first_error = list(errors.values())[0]
+            if isinstance(first_error, list):
+                first_error = first_error[0]
+            return error_response(message=str(first_error))
+
+        try:
+            changed = assign_operators(
+                stock_out,
+                approver=serializer.validated_data.get('approver'),
+                intake_operator=serializer.validated_data.get('intake_operator'),
+                release_operator=serializer.validated_data.get('release_operator'),
+            )
+        except WorkflowError as exc:
+            return error_response(message=exc.message, code=exc.code)
+
+        logger.info("用户 %s 对出库单 %s 重新分配节点 %s", request.user.username, pk, changed)
+        stock_out.refresh_from_db()
+        return success_response(data=StockOutSerializer(stock_out).data, message='分配已更新')
+
+
+def _workflow_response(exc):
+    """把工作流错误统一成带 need_reassign 提示的响应。"""
+    return error_response(message=exc.message, code=exc.code, data=exc.extra or None)
+
+
+class StockOutApprovalView(APIView):
+    """关键节点：审批（通过/驳回），通过时固定核验审批人当时资质。"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        stock_out = StockOut.objects.select_related('goods').filter(pk=pk).first()
+        if not stock_out:
+            return error_response(message='出库单不存在', code=404)
+
+        action = request.data.get('action', 'approve')
+        remark = request.data.get('remark', '')
+        try:
+            if action == 'reject':
+                reject_stock_out(stock_out, request.user, remark=remark)
+                logger.info("用户 %s 驳回复出库单 %s", request.user.username, pk)
+            else:
+                _, check = perform_node(stock_out, 'approval', request.user, remark=remark)
+                logger.info("用户 %s 审批通过出库单 %s（核验 %s）",
+                            request.user.username, pk, check.result)
+        except WorkflowError as exc:
+            logger.warning("出库单 %s 审批阻断：%s", pk, exc.message)
+            return _workflow_response(exc)
+
+        stock_out.refresh_from_db()
+        return success_response(data=StockOutSerializer(stock_out).data, message='审批完成')
+
+
+class StockOutReceiveView(APIView):
+    """关键节点：收件，固定核验收件人当时资质。"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        stock_out = StockOut.objects.select_related('goods').filter(pk=pk).first()
+        if not stock_out:
+            return error_response(message='出库单不存在', code=404)
+        remark = request.data.get('remark', '')
+        try:
+            _, check = perform_node(stock_out, 'receive', request.user, remark=remark)
+        except WorkflowError as exc:
+            logger.warning("出库单 %s 收件阻断：%s", pk, exc.message)
+            return _workflow_response(exc)
+        logger.info("用户 %s 完成出库单 %s 收件（核验 %s）", request.user.username, pk, check.result)
+        stock_out.refresh_from_db()
+        return success_response(data=StockOutSerializer(stock_out).data, message='收件完成')
+
+
+class StockOutReleaseView(APIView):
+    """关键节点：放行，固定核验放行人当时资质并扣减库存。"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        stock_out = StockOut.objects.select_related('goods').filter(pk=pk).first()
+        if not stock_out:
+            return error_response(message='出库单不存在', code=404)
+        remark = request.data.get('remark', '')
+        try:
+            _, check = perform_node(stock_out, 'release', request.user, remark=remark)
+        except WorkflowError as exc:
+            logger.warning("出库单 %s 放行阻断：%s", pk, exc.message)
+            return _workflow_response(exc)
+        logger.info("用户 %s 放行出库单 %s（核验 %s）", request.user.username, pk, check.result)
+        stock_out.refresh_from_db()
+        return success_response(data=StockOutSerializer(stock_out).data, message='放行完成')
 
 
 class WarningListView(APIView):
     """预警记录列表视图"""
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
+        queryset = Warning.objects.select_related('goods').all().order_by('-created_at')
+        goods = request.query_params.get('goods')
+        if goods:
+            queryset = queryset.filter(goods_id=goods)
+        is_read = request.query_params.get('is_read')
+        if is_read is not None:
+            queryset = queryset.filter(is_read=is_read in ('1', 'true', 'True'))
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 10))
+        start = (page - 1) * page_size
+        total = queryset.count()
+        serializer = WarningSerializer(queryset[start:start + page_size], many=True)
         return success_response(data={
-            'list': [],
-            'total': 0,
-            'page': 1,
-            'page_size': 10
+            'list': serializer.data, 'total': total, 'page': page, 'page_size': page_size
         })
 
 
 class ApprovalListView(APIView):
     """审批记录列表视图"""
     permission_classes = [IsAuthenticated]
-    
+
     def get(self, request):
+        queryset = Approval.objects.select_related('stock_out', 'approver').all().order_by('-created_at')
+        stock_out = request.query_params.get('stock_out')
+        if stock_out:
+            queryset = queryset.filter(stock_out_id=stock_out)
+        status = request.query_params.get('status')
+        if status:
+            queryset = queryset.filter(status=status)
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 10))
+        start = (page - 1) * page_size
+        total = queryset.count()
+        serializer = ApprovalSerializer(queryset[start:start + page_size], many=True)
         return success_response(data={
-            'list': [],
-            'total': 0,
-            'page': 1,
-            'page_size': 10
+            'list': serializer.data, 'total': total, 'page': page, 'page_size': page_size
         })
