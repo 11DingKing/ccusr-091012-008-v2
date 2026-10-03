@@ -130,7 +130,7 @@ class Goods(models.Model):
 
 
 class StockIn(models.Model):
-    """入库记录模型"""
+    """入库（收件）记录模型"""
     goods = models.ForeignKey(
         Goods, on_delete=models.CASCADE,
         related_name='stock_ins', verbose_name='货物'
@@ -144,7 +144,11 @@ class StockIn(models.Model):
     supplier = models.CharField('供应商', max_length=200, blank=True)
     stock_in_time = models.DateTimeField('入库时间', auto_now_add=True)
     remark = models.TextField('备注', blank=True)
-    
+    qualification_check = models.ForeignKey(
+        'personnel.QualificationCheck', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='stock_ins', verbose_name='收件资质核验记录'
+    )
+
     class Meta:
         db_table = 'wh_stock_in'
         verbose_name = '入库记录'
@@ -178,6 +182,12 @@ class StockOut(models.Model):
     status = models.CharField('状态', max_length=20, choices=STATUS_CHOICES, default='pending')
     stock_out_time = models.DateTimeField('出库时间', null=True, blank=True)
     remark = models.TextField('备注', blank=True)
+    qualification_check = models.ForeignKey(
+        'personnel.QualificationCheck', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='stock_outs', verbose_name='放行资质核验记录'
+    )
+    last_block_reason = models.CharField('最近阻断原因', max_length=300, blank=True, default='')
+    last_block_at = models.DateTimeField('最近阻断时间', null=True, blank=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     
     class Meta:
@@ -235,6 +245,10 @@ class Approval(models.Model):
     )
     status = models.CharField('审批状态', max_length=20, choices=STATUS_CHOICES, default='pending')
     remark = models.TextField('审批意见', blank=True)
+    qualification_check = models.ForeignKey(
+        'personnel.QualificationCheck', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='approvals', verbose_name='审批资质核验记录'
+    )
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
     

@@ -1,6 +1,8 @@
 """
 仓库管理序列化器
 """
+from decimal import Decimal
+
 from rest_framework import serializers
 from .models import Unit, Category, Variety, Goods, StockIn, StockOut, Warning, Approval
 
@@ -152,13 +154,37 @@ class StockInSerializer(serializers.ModelSerializer):
     """入库记录序列化器"""
     goods_name = serializers.CharField(source='goods.name', read_only=True)
     operator_name = serializers.CharField(source='operator.username', read_only=True)
-    
+    qualification_result = serializers.CharField(
+        source='qualification_check.result', read_only=True
+    )
+    qualification_detail = serializers.CharField(
+        source='qualification_check.detail', read_only=True
+    )
+
     class Meta:
         model = StockIn
         fields = [
             'id', 'goods', 'goods_name', 'operator', 'operator_name',
-            'quantity', 'batch_no', 'supplier', 'stock_in_time', 'remark'
+            'quantity', 'batch_no', 'supplier', 'stock_in_time', 'remark',
+            'qualification_check', 'qualification_result', 'qualification_detail'
         ]
+
+
+class StockInCreateSerializer(serializers.Serializer):
+    """收件创建序列化器"""
+    goods = serializers.IntegerField(required=True, error_messages={'required': '请选择货物'})
+    quantity = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'),
+        required=True, error_messages={'required': '请填写收件数量', 'min_value': '收件数量必须大于0'}
+    )
+    batch_no = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    supplier = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    remark = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_goods(self, value):
+        if not Goods.objects.filter(pk=value, is_active=True).exists():
+            raise serializers.ValidationError('货物不存在或已停用')
+        return value
 
 
 class StockOutSerializer(serializers.ModelSerializer):
@@ -166,37 +192,78 @@ class StockOutSerializer(serializers.ModelSerializer):
     goods_name = serializers.CharField(source='goods.name', read_only=True)
     operator_name = serializers.CharField(source='operator.username', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    
+    qualification_result = serializers.CharField(
+        source='qualification_check.result', read_only=True
+    )
+    qualification_detail = serializers.CharField(
+        source='qualification_check.detail', read_only=True
+    )
+
     class Meta:
         model = StockOut
         fields = [
             'id', 'goods', 'goods_name', 'operator', 'operator_name',
             'receiver', 'receiver_dept', 'quantity', 'status', 'status_display',
-            'stock_out_time', 'remark', 'created_at'
+            'stock_out_time', 'remark',
+            'qualification_check', 'qualification_result', 'qualification_detail',
+            'last_block_reason', 'last_block_at', 'created_at'
         ]
 
 
-class WarningSerializer(serializers.ModelSerializer):
-    """预警记录序列化器"""
-    goods_name = serializers.CharField(source='goods.name', read_only=True)
-    type_display = serializers.CharField(source='get_type_display', read_only=True)
-    
-    class Meta:
-        model = Warning
-        fields = [
-            'id', 'goods', 'goods_name', 'type', 'type_display',
-            'message', 'is_read', 'created_at'
-        ]
+class StockOutCreateSerializer(serializers.Serializer):
+    """出库申请创建序列化器（提交申请本身不核验资质，审批与放行节点才核验）"""
+    goods = serializers.IntegerField(required=True, error_messages={'required': '请选择货物'})
+    receiver = serializers.CharField(max_length=100, required=True, error_messages={
+        'required': '请填写领用人',
+        'blank': '领用人不能为空',
+    })
+    receiver_dept = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    quantity = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal('0.01'),
+        required=True, error_messages={'required': '请填写出库数量', 'min_value': '出库数量必须大于0'}
+    )
+    remark = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_goods(self, value):
+        if not Goods.objects.filter(pk=value, is_active=True).exists():
+            raise serializers.ValidationError('货物不存在或已停用')
+        return value
 
 
 class ApprovalSerializer(serializers.ModelSerializer):
     """审批记录序列化器"""
     approver_name = serializers.CharField(source='approver.username', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
-    
+    qualification_result = serializers.CharField(
+        source='qualification_check.result', read_only=True
+    )
+    qualification_detail = serializers.CharField(
+        source='qualification_check.detail', read_only=True
+    )
+
     class Meta:
         model = Approval
         fields = [
             'id', 'stock_out', 'approver', 'approver_name',
-            'status', 'status_display', 'remark', 'created_at', 'updated_at'
+            'status', 'status_display', 'remark',
+            'qualification_check', 'qualification_result', 'qualification_detail',
+            'created_at', 'updated_at'
+        ]
+
+
+class ApprovalDecisionSerializer(serializers.Serializer):
+    """审批决定序列化器"""
+    remark = serializers.CharField(max_length=500, required=False, allow_blank=True)
+
+
+class WarningSerializer(serializers.ModelSerializer):
+    """预警记录序列化器"""
+    goods_name = serializers.CharField(source='goods.name', read_only=True)
+    type_display = serializers.CharField(source='get_type_display', read_only=True)
+
+    class Meta:
+        model = Warning
+        fields = [
+            'id', 'goods', 'goods_name', 'type', 'type_display',
+            'message', 'is_read', 'created_at'
         ]
